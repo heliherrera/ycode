@@ -157,9 +157,18 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
 
   const componentIsSaving = useComponentsStore((state) => state.isSaving);
   const components = useComponentsStore((state) => state.components);
-  const componentDraftLayers = useComponentsStore((state) =>
-    editingComponentId ? state.componentDrafts[editingComponentId] ?? null : null
-  );
+  // Track the active variant draft so layer-tracking refs (selection
+  // restoration, dirty detection) react to variant edits.
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
+  const componentDraftLayers = useComponentsStore((state) => {
+    if (!editingComponentId) return null;
+    const drafts = state.componentDrafts[editingComponentId];
+    if (!drafts) return null;
+    const variantId = (editingComponentVariantId && drafts[editingComponentVariantId])
+      ? editingComponentVariantId
+      : Object.keys(drafts)[0];
+    return variantId ? drafts[variantId] ?? null : null;
+  });
 
   const migrationsComplete = useMigrationStore((state) => state.migrationsComplete);
   const setMigrationsComplete = useMigrationStore((state) => state.setMigrationsComplete);
@@ -206,27 +215,37 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
   // Combined saving state - either page or component
   const isCurrentlySaving = editingComponentId ? componentIsSaving : isSaving;
 
-  // Helper: Get current layers (from page or component)
+  // Helper: Get current layers (from page or active component variant)
   const getCurrentLayers = useCallback((): Layer[] => {
     if (editingComponentId) {
-      const { componentDrafts } = useComponentsStore.getState();
-      return componentDrafts[editingComponentId] || [];
+      const { componentDrafts, getComponentDraftLayers } = useComponentsStore.getState();
+      const drafts = componentDrafts[editingComponentId];
+      const variantId = (editingComponentVariantId && drafts?.[editingComponentVariantId])
+        ? editingComponentVariantId
+        : (drafts ? Object.keys(drafts)[0] : null);
+      return getComponentDraftLayers(editingComponentId, variantId);
     }
     if (currentPageId) {
       return currentDraft ? currentDraft.layers : [];
     }
     return [];
-  }, [editingComponentId, currentPageId, currentDraft]);
+  }, [editingComponentId, editingComponentVariantId, currentPageId, currentDraft]);
 
-  // Helper: Update current layers (page or component)
+  // Helper: Update current layers (page or active component variant)
   const updateCurrentLayers = useCallback((newLayers: Layer[]) => {
     if (editingComponentId) {
-      const { updateComponentDraft } = useComponentsStore.getState();
-      updateComponentDraft(editingComponentId, newLayers);
+      const { componentDrafts, updateComponentDraft } = useComponentsStore.getState();
+      const drafts = componentDrafts[editingComponentId];
+      const variantId = (editingComponentVariantId && drafts?.[editingComponentVariantId])
+        ? editingComponentVariantId
+        : (drafts ? Object.keys(drafts)[0] : null);
+      if (variantId) {
+        updateComponentDraft(editingComponentId, variantId, newLayers);
+      }
     } else if (currentPageId) {
       setDraftLayers(currentPageId, newLayers);
     }
-  }, [editingComponentId, currentPageId, setDraftLayers]);
+  }, [editingComponentId, editingComponentVariantId, currentPageId, setDraftLayers]);
 
   // Check if Supabase is configured, redirect to setup if not
   const [supabaseConfigured, setSupabaseConfigured] = useState<boolean | null>(null);
@@ -622,10 +641,20 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
       const { getComponentById, loadComponentDraft } = useComponentsStore.getState();
       const component = getComponentById(resourceId);
       if (component && editingComponentId !== resourceId) {
-        const { setEditingComponentId } = useEditorStore.getState();
+        const { setEditingComponentId, setEditingComponentVariantId } = useEditorStore.getState();
         // Use currentPageId if available, otherwise find homepage as fallback
         const returnPageId = currentPageId || (pages.length > 0 ? (findHomepage(pages)?.id || pages[0]?.id) : null);
         setEditingComponentId(resourceId, returnPageId);
+        // Restore the active variant from the URL when present so reloads land
+        // back on the same variant. Falls back to the first variant when the
+        // URL is missing/stale, matching `use-edit-component`.
+        const variantFromUrl = urlState.variantId;
+        const variantExists = variantFromUrl
+          && component.variants?.some(v => v.id === variantFromUrl);
+        const initialVariantId = variantExists
+          ? variantFromUrl!
+          : (component.variants && component.variants.length > 0 ? component.variants[0].id : null);
+        setEditingComponentVariantId(initialVariantId);
         // Load component draft (async but we don't need to await in this context)
         loadComponentDraft(resourceId);
       }
@@ -640,6 +669,14 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
       navigateToLayers(defaultPage.id);
     }
   }, [migrationsComplete, pages.length, components.length, collections.length, routeType, resourceId, currentPageId, editingComponentId, pages, components, collections, setCurrentPageId, setSelectedLayerId, navigateToLayers, navigateToCollection, navigateToCollections, urlState.layerId]);
+
+  // Mirror the active component variant id into the URL while editing a
+  // component, so reloads land back on the same variant. Uses
+  // `updateQueryParams` to avoid a router push (no history entry).
+  useEffect(() => {
+    if (routeType !== 'component') return;
+    updateQueryParams({ variant: editingComponentVariantId ?? null });
+  }, [routeType, editingComponentVariantId, updateQueryParams]);
 
   // Auto-select Body layer when switching pages (not when draft updates)
   useEffect(() => {
@@ -823,17 +860,22 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
   // Stable callback for layer updates - reads current state from stores to avoid
   // dependency on editingComponentId/currentPageId which would break React.memo
   const handleLayerUpdate = useCallback((layerId: string, updates: Partial<Layer>) => {
-    const { editingComponentId: compId } = useEditorStore.getState();
+    const { editingComponentId: compId, editingComponentVariantId: variantId } = useEditorStore.getState();
     if (compId) {
       const { componentDrafts, updateComponentDraft } = useComponentsStore.getState();
-      const layers = componentDrafts[compId] || [];
+      const variantDrafts = componentDrafts[compId];
+      const targetVariantId = (variantId && variantDrafts?.[variantId])
+        ? variantId
+        : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      if (!targetVariantId || !variantDrafts) return;
+      const layers = variantDrafts[targetVariantId] || [];
       const updateTree = (tree: Layer[]): Layer[] =>
         tree.map(l => {
           if (l.id === layerId) return { ...l, ...updates };
           if (l.children) return { ...l, children: updateTree(l.children) };
           return l;
         });
-      updateComponentDraft(compId, updateTree(layers));
+      updateComponentDraft(compId, targetVariantId, updateTree(layers));
     } else {
       const pageId = useEditorStore.getState().currentPageId;
       if (pageId) {
@@ -1090,8 +1132,18 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
           }
         }
       } else {
-        // Returning to a page (or no stack entry)
-        let targetPageId = returnToPageId;
+        // Returning to a page (or no stack entry).
+        //
+        // `returnToPageId` is a snapshot taken when the user entered component
+        // edit mode and isn't refreshed for non-page entry points (CMS,
+        // Settings, etc.) or after the source page was deleted. In those cases
+        // it would point at a stale/missing page and Next.js would silently
+        // 404 — to the user it just looks like "preview opened the wrong
+        // page". Validate it against the current pages list and silently fall
+        // back to the homepage when it's no longer valid.
+        const isValidReturnPage = returnToPageId
+          && pages.some(p => p.id === returnToPageId);
+        let targetPageId = isValidReturnPage ? returnToPageId : null;
         if (!targetPageId) {
           const homePage = findHomepage(pages);
           const defaultPage = homePage || pages[0];
@@ -1103,6 +1155,12 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
           return;
         }
 
+        // If we fell back, the saved `returnToLayerId` belongs to the original
+        // (now-missing) page and would dangle on the homepage. Drop it.
+        const layerToRestore = isValidReturnPage
+          ? (returnToLayerId || returnDestination?.layerId || undefined)
+          : undefined;
+
         // Clear edit mode state synchronously, then navigate.
         // The URL sync effect will restore the correct layer from the URL.
         setEditingComponentId(null, null);
@@ -1110,7 +1168,7 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
           targetPageId,
           undefined,
           undefined,
-          returnToLayerId || returnDestination?.layerId || undefined
+          layerToRestore
         );
       }
     } finally {

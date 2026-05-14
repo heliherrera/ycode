@@ -5,6 +5,7 @@
  */
 
 import type { Layer, Component, ComponentVariable, ComponentVariableValue, LayerVariables } from '@/types';
+import { getComponentVariantLayers } from './component-variant-utils';
 
 /**
  * Remap collection_layer_id in a FieldVariable using the ID map.
@@ -555,13 +556,19 @@ export function resolveComponents(
 
       const component = components.find(c => c.id === layer.componentId);
 
-      if (component?.layers?.length) {
+      // Pick the layer tree for the variant this instance is bound to. Falls
+      // back to the first variant when the requested variant no longer exists
+      // (silent fallback for deleted variants) or to the legacy `layers` field
+      // for components stored before the variants migration.
+      const variantLayers = component ? getComponentVariantLayers(component, layer.componentVariantId) : [];
+
+      if (component && variantLayers.length) {
         // Track this component in the resolution chain
         const innerVisited = new Set(visited);
         innerVisited.add(layer.componentId);
 
-        // The component's first layer is the actual content (Section, etc.)
-        const componentContent = component.layers[0];
+        // The variant's first layer is the actual content (Section, etc.)
+        const componentContent = variantLayers[0];
 
         // Recursively resolve nested components, passing current component's
         // variables and this instance's overrides so nested variableLinks resolve correctly

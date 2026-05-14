@@ -401,6 +401,9 @@ export interface Layer {
 
   // Components (reusable layer trees)
   componentId?: string; // Reference to applied Component
+  // Selected variant id within the referenced component. When undefined or
+  // pointing to a missing variant, the first variant ("Default") is used.
+  componentVariantId?: string;
   componentOverrides?: {
     text?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (text)
     rich_text?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (rich text)
@@ -610,15 +613,29 @@ export interface ComponentVariable {
   default_value?: ComponentVariableValue; // Default value
 }
 
+// A named layer tree variant of a component (e.g. "Default", "Small", "Large").
+// All variants share the same component-level `variables`.
+export interface ComponentVariant {
+  id: string;
+  name: string;
+  layers: Layer[];
+}
+
 // Component Types (Reusable Layer Trees)
 export interface Component {
   id: string;
   name: string;
 
-  // Component data - complete layer tree
+  // Component data - complete layer tree.
+  // Mirrors `variants[0].layers` for backwards compatibility; new code should
+  // read from `variants` via `getComponentVariantLayers()`.
   layers: Layer[];
 
-  // Component variables - exposed properties for overrides
+  // Named layer tree variants. Always has at least one entry ("Default")
+  // after the variants migration runs. Treat this as the source of truth.
+  variants?: ComponentVariant[];
+
+  // Component variables - exposed properties for overrides (shared across variants)
   variables?: ComponentVariable[];
 
   // Versioning fields

@@ -304,7 +304,7 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
   };
 
   // Get store values
-  const { currentPageId, editingComponentId } = useEditorStore();
+  const { currentPageId, editingComponentId, editingComponentVariantId } = useEditorStore();
   const { draftsByPageId } = usePagesStore();
   const { componentDrafts } = useComponentsStore();
 
@@ -314,7 +314,11 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
 
     let layers: Layer[] = [];
     if (editingComponentId) {
-      layers = componentDrafts[editingComponentId] || [];
+      const variantDrafts = componentDrafts[editingComponentId];
+      const variantId = (editingComponentVariantId && variantDrafts?.[editingComponentVariantId])
+        ? editingComponentVariantId
+        : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      layers = (variantId && variantDrafts) ? variantDrafts[variantId] || [] : [];
     } else if (currentPageId) {
       const draft = draftsByPageId[currentPageId];
       layers = draft ? draft.layers : [];

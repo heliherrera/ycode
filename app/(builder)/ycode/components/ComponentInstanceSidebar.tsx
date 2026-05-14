@@ -12,6 +12,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 import ComponentVariableOverrides from './ComponentVariableOverrides';
 import ComponentVariablesDialog from './ComponentVariablesDialog';
@@ -151,7 +158,14 @@ export default function ComponentInstanceSidebar({
     const newLayers = detachSpecificLayerFromComponent(allLayers, selectedLayerId, component);
 
     if (editingComponentId) {
-      updateComponentDraft(editingComponentId, newLayers);
+      // Detach happens against whichever variant the user is currently
+      // editing — that's what `allLayers` was sourced from upstream.
+      const variantId = useEditorStore.getState().editingComponentVariantId;
+      const variantDrafts = useComponentsStore.getState().componentDrafts[editingComponentId];
+      const targetVariantId = (variantId && variantDrafts?.[variantId]) ? variantId : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      if (targetVariantId) {
+        updateComponentDraft(editingComponentId, targetVariantId, newLayers);
+      }
     } else if (currentPageId) {
       setDraftLayers(currentPageId, newLayers);
     }
@@ -226,6 +240,29 @@ export default function ComponentInstanceSidebar({
                 <span className="ml-auto text-[10px] italic text-orange-600 dark:text-orange-200">Overridden</span>
               )}
             </div>
+
+            {/* Variant selector — only meaningful when the component has more
+                than one variant. Variables are shared across variants, so
+                changing the variant only switches the layer tree. */}
+            {component.variants && component.variants.length > 1 && (
+              <Select
+                value={selectedLayer.componentVariantId ?? component.variants[0].id}
+                onValueChange={(value) => {
+                  onLayerUpdate(selectedLayerId, { componentVariantId: value });
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Variant" />
+                </SelectTrigger>
+                <SelectContent>
+                  {component.variants.map((variant) => (
+                    <SelectItem key={variant.id} value={variant.id}>
+                      {variant.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
 
             <Button
               size="sm"

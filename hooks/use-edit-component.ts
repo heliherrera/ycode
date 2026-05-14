@@ -45,12 +45,21 @@ export function useEditComponent(): (componentId: string, options?: EditComponen
       currentPageId,
       editingComponentId,
       setSelectedLayerId,
+      setEditingComponentVariantId,
       pushComponentNavigation,
     } = useEditorStore.getState();
     const { pages } = usePagesStore.getState();
 
     const component = getComponentById(componentId);
     if (!component) return;
+
+    // Default to the first variant when entering a component. The URL may
+    // override this via `?variant=…` (handled by the URL→state sync effect),
+    // but seeding here means the editor never starts with a `null` variant.
+    const defaultVariantId = component.variants && component.variants.length > 0
+      ? component.variants[0].id
+      : null;
+    setEditingComponentVariantId(defaultVariantId);
 
     setSelectedLayerId(null);
 
@@ -77,7 +86,7 @@ export function useEditComponent(): (componentId: string, options?: EditComponen
     }
 
     await loadComponentDraft(componentId);
-    openComponent(componentId, currentPageId, undefined, returnToLayerId);
+    openComponent(componentId, currentPageId, undefined, returnToLayerId, defaultVariantId);
 
     // Select an initial layer inside the component if the user hasn't
     // already selected something valid during the await.
