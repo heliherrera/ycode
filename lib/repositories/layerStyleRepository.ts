@@ -7,7 +7,12 @@
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { LayerStyle, Layer } from '@/types';
-import { generateLayerStyleContentHash } from '../hash-utils';
+import {
+  generateLayerStyleContentHash,
+  generatePageLayersHash,
+  generateComponentContentHash,
+} from '../hash-utils';
+import { updateLayersWithStyle } from '@/lib/layer-style-utils';
 
 /**
  * Input data for creating a new layer style
@@ -725,4 +730,115 @@ export async function deleteStyle(id: string): Promise<void> {
   if (error) {
     throw new Error(`Failed to delete layer style: ${error.message}`);
   }
+}
+
+/**
+ * Propagate updated layer style values into the draft layers of every page
+ * and component that references them.
+ *
+ * Layer styles are denormalized: when applied, the style's classes/design are
+ * COPIED onto the layer (alongside layer.styleId). The builder client only
+ * syncs the currently-open pages when a style is edited, so pages and
+ * components that aren't loaded keep stale denormalized values in the DB.
+ *
+ * Without this server-side sync, publishing a style change updates only the
+ * layer_styles row — the layers themselves still carry the OLD classes, so
+ * the published HTML references the old class names and renders with the
+ * old style. The CSS catch-up doesn't fix it because it generates CSS from
+ * the same stale layers.
+ *
+ * Skips layers that have styleOverrides (local customizations win). Also
+ * handles textStyles entries (rich-text inline styles) via the existing
+ * updateLayersWithStyle helper.
+ *
+ * @returns IDs of pages and components whose drafts were updated. Callers
+ *   should republish affected components so their published versions get
+ *   the fresh classes; affected pages are handled by the CSS catch-up step.
+ */
+export async function syncLayerStyleChangesToDrafts(
+  styleIds: string[],
+): Promise<{ affectedPageIds: string[]; affectedComponentIds: string[] }> {
+  if (styleIds.length === 0) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  // Use the just-published versions of the changed styles as the source of
+  // truth: they were just upserted by publishLayerStyles with the new values.
+  const { data: styles } = await client
+    .from('layer_styles')
+    .select('id, classes, design')
+    .in('id', styleIds)
+    .eq('is_published', true)
+    .is('deleted_at', null);
+
+  if (!styles || styles.length === 0) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  // --- Sync draft page_layers ---
+  const { data: pageLayersRecords } = await client
+    .from('page_layers')
+    .select('id, page_id, layers, generated_css, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  const affectedPageIds: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const record of pageLayersRecords || []) {
+    let layers = (record.layers as Layer[]) || [];
+    for (const style of styles) {
+      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+    }
+
+    const newHash = generatePageLayersHash({
+      layers,
+      generated_css: record.generated_css ?? null,
+    });
+
+    if (newHash !== record.content_hash) {
+      affectedPageIds.push(record.page_id);
+      await client
+        .from('page_layers')
+        .update({ layers, content_hash: newHash, updated_at: now })
+        .eq('id', record.id);
+    }
+  }
+
+  // --- Sync draft components ---
+  const { data: componentRecords } = await client
+    .from('components')
+    .select('id, name, layers, variables, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  const affectedComponentIds: string[] = [];
+
+  for (const record of componentRecords || []) {
+    let layers = (record.layers as Layer[]) || [];
+    for (const style of styles) {
+      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+    }
+
+    const newHash = generateComponentContentHash({
+      name: record.name,
+      layers,
+      variables: record.variables,
+    });
+
+    if (newHash !== record.content_hash) {
+      affectedComponentIds.push(record.id);
+      await client
+        .from('components')
+        .update({ layers, content_hash: newHash, updated_at: now })
+        .eq('id', record.id);
+    }
+  }
+
+  return { affectedPageIds, affectedComponentIds };
 }

@@ -357,6 +357,37 @@ export async function POST(request: NextRequest) {
       stats.tables.layer_styles.durationMs = Math.round(performance.now() - stepStart);
     }
 
+    // Propagate updated style values into the denormalized layer.classes on
+    // every draft page/component that references the changed styles. The
+    // builder only syncs pages currently loaded in memory, so pages and
+    // components that weren't open keep stale denormalized values. Without
+    // this step they publish with the OLD class names and render with the
+    // old style even though the layer_styles row was just updated.
+    if (changedLayerStyleIds.length > 0) {
+      try {
+        const { syncLayerStyleChangesToDrafts } = await import('@/lib/repositories/layerStyleRepository');
+        const sync = await syncLayerStyleChangesToDrafts(changedLayerStyleIds);
+
+        if (sync.affectedComponentIds.length > 0) {
+          // Re-publish components whose draft layers just got rewritten so
+          // the published versions carry the fresh classes too.
+          const repubResult = await publishComponents(sync.affectedComponentIds);
+          for (const id of repubResult.changedComponentIds) {
+            if (!changedComponentIds.includes(id)) changedComponentIds.push(id);
+          }
+          console.log(`[Publish] style sync: re-published ${repubResult.changedComponentIds.length} component(s)`);
+        }
+
+        if (sync.affectedPageIds.length > 0) {
+          // Page layers will be republished by the CSS catch-up + batchPublishPageLayers
+          // step below — the draft now has fresh classes and a fresh hash.
+          console.log(`[Publish] style sync: updated ${sync.affectedPageIds.length} page draft(s)`);
+        }
+      } catch (err) {
+        console.error('[Publish] Layer style sync failed (non-fatal):', err);
+      }
+    }
+
     // Track routes of deleted pages (must resolve BEFORE rows are removed from DB)
     const deletedPageRoutes: string[] = [];
 
