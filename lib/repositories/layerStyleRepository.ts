@@ -811,10 +811,17 @@ export async function syncLayerStyleChangesToDrafts(
 
     if (newHash !== record.content_hash) {
       affectedPageIds.push(record.page_id);
+      // CRITICAL: page_layers has a composite primary key (id, is_published).
+      // Drafts and published rows share the same `id`, so without filtering
+      // by is_published this UPDATE silently clobbers the published row too,
+      // writing the new layers + hash but NOT a fresh generated_css. That
+      // breaks the published render (new class names, old CSS file) AND
+      // makes batchPublishPageLayers below think nothing changed.
       await client
         .from('page_layers')
         .update({ layers, content_hash: newHash, updated_at: now })
-        .eq('id', record.id);
+        .eq('id', record.id)
+        .eq('is_published', false);
     }
   }
 
@@ -845,10 +852,13 @@ export async function syncLayerStyleChangesToDrafts(
 
     if (newHash !== record.content_hash) {
       affectedComponentIds.push(record.id);
+      // Same composite-key trap as page_layers: components share an `id`
+      // across draft/published. Always scope the update to the draft row.
       await client
         .from('components')
         .update({ layers, content_hash: newHash, updated_at: now })
-        .eq('id', record.id);
+        .eq('id', record.id)
+        .eq('is_published', false);
     }
   }
 
