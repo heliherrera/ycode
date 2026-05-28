@@ -57,6 +57,7 @@ import { useLiveLayerUpdates } from '@/hooks/use-live-layer-updates';
 import { useLivePageUpdates } from '@/hooks/use-live-page-updates';
 import { useLiveComponentUpdates } from '@/hooks/use-live-component-updates';
 import { useLiveLayerStyleUpdates } from '@/hooks/use-live-layer-style-updates';
+import { useFigmaPaste } from '@/hooks/use-figma-paste';
 
 // 4. Stores
 import { useAuthStore } from '@/stores/useAuthStore';
@@ -263,6 +264,35 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
       setDraftLayers(currentPageId, newLayers);
     }
   }, [editingComponentId, editingComponentVariantId, currentPageId, setDraftLayers]);
+
+  // Figma paste: detect Figma plugin clipboard data and convert to layers
+  const insertFigmaLayers = useCallback((layers: Layer[]) => {
+    const currentLayers = getCurrentLayers();
+    const body = currentLayers.find(l => l.id === 'body' || l.name === 'body');
+
+    if (body) {
+      const updatedLayers = currentLayers.map(layer => {
+        if (layer.id === body.id) {
+          return { ...layer, children: [...(layer.children || []), ...layers] };
+        }
+        return layer;
+      });
+      updateCurrentLayers(updatedLayers);
+      if (layers.length > 0) {
+        setSelectedLayerId(layers[0].id);
+      }
+    }
+  }, [getCurrentLayers, updateCurrentLayers, setSelectedLayerId]);
+
+  const figmaSelectedLayerId = useEditorStore((state) => state.selectedLayerId);
+
+  useFigmaPaste({
+    enabled: !!(currentPageId || editingComponentId),
+    currentPageId,
+    selectedLayerId: figmaSelectedLayerId,
+    editingComponentId,
+    insertLayers: insertFigmaLayers,
+  });
 
   // Check if Supabase is configured, redirect to setup if not
   const [supabaseConfigured, setSupabaseConfigured] = useState<boolean | null>(null);
