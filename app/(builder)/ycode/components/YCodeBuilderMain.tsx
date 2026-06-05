@@ -75,6 +75,7 @@ import { useMigrationStore } from '@/stores/useMigrationStore';
 import { useVersionsStore } from '@/stores/useVersionsStore';
 import { useRole } from '@/hooks/use-role';
 import { useImportPaste } from '@/hooks/use-import-paste';
+import type { ExternalPastePlacement } from '@/stores/useExternalPasteStore';
 // Collaboration temporarily disabled
 // import { useCollaborationPresenceStore } from '@/stores/useCollaborationPresenceStore';
 
@@ -271,8 +272,71 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
   // Placement mirrors Ycode's own copy/paste: insert inside the selected layer
   // when it can hold children, otherwise drop in as a sibling next to it; with
   // nothing suitable selected, fall back to the page root (body).
-  const insertImportedLayers = useCallback((layers: Layer[]) => {
+  const insertImportedLayers = useCallback((layers: Layer[], placement?: ExternalPastePlacement) => {
     if (layers.length === 0 || !canEditStructure) return;
+
+    // Explicit placement from the context menu's "Paste after / inside": honour
+    // the chosen position relative to the target layer instead of the default
+    // selection-based heuristic below.
+    if (placement) {
+      if (editingComponentId) {
+        const currentLayers = getCurrentLayers();
+        const target = findLayerById(currentLayers, placement.layerId);
+        if (!target) return;
+
+        let updated: Layer[];
+        if (placement.mode === 'inside') {
+          if (layers.some(l => !canPasteIntoParent(currentLayers, target.id, l))) {
+            toast.error(LINK_NESTING_ERROR.title, { description: LINK_NESTING_ERROR.description });
+            return;
+          }
+          updated = updateLayerProps(currentLayers, target.id, {
+            children: [...(target.children || []), ...layers],
+          });
+        } else {
+          const result = findParentAndIndex(currentLayers, target.id);
+          if (!result) return;
+          if (
+            result.parent &&
+            layers.some(l => !canPasteIntoParent(currentLayers, result.parent!.id, l))
+          ) {
+            toast.error(LINK_NESTING_ERROR.title, { description: LINK_NESTING_ERROR.description });
+            return;
+          }
+          updated = currentLayers;
+          let index = result.index;
+          for (const layer of layers) {
+            updated = insertLayerAfter(updated, result.parent, index, layer);
+            index += 1;
+          }
+        }
+        updateCurrentLayers(updated);
+        setSelectedLayerId(layers[0].id);
+        return;
+      }
+
+      if (!currentPageId) return;
+      if (placement.mode === 'inside') {
+        for (const layer of layers) {
+          if (!pasteInside(currentPageId, placement.layerId, layer)) {
+            toast.error(LINK_NESTING_ERROR.title, { description: LINK_NESTING_ERROR.description });
+            return;
+          }
+        }
+      } else {
+        let anchorId = placement.layerId;
+        for (const layer of layers) {
+          const pasted = pasteAfter(currentPageId, anchorId, layer);
+          if (!pasted) {
+            toast.error(LINK_NESTING_ERROR.title, { description: LINK_NESTING_ERROR.description });
+            return;
+          }
+          anchorId = pasted.id;
+        }
+      }
+      setSelectedLayerId(layers[0].id);
+      return;
+    }
 
     const selectedId = selectedLayerIdRef.current;
 

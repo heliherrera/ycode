@@ -27,6 +27,18 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
+/**
+ * Outcome of resolving the connected site's stylesheet.
+ *
+ * `reason` lets the paste handler tell apart "the user never connected a site"
+ * (offer to connect one) from "we tried but the fetch failed" (don't nag — it's
+ * likely transient), while both still let the paste proceed without backfill.
+ */
+export interface StylesheetResult {
+  css?: string;
+  reason?: 'no-site' | 'failed';
+}
+
 /** Drop cached stylesheets — call when the connected site URL changes. */
 export function clearStylesheetCache(): void {
   cache.clear();
@@ -35,27 +47,29 @@ export function clearStylesheetCache(): void {
 /**
  * Resolve the connected site's global stylesheet CSS (cached).
  *
- * Returns `undefined` when no site is configured or the stylesheet can't be
- * resolved — paste still works, just without global-style backfill.
+ * Never throws — paste still works without global-style backfill. When no CSS
+ * is returned, `reason` explains why so the caller can decide whether to hint.
  */
-export async function loadSiteStylesheetCss(): Promise<string | undefined> {
+export async function loadSiteStylesheetCss(): Promise<StylesheetResult> {
   try {
     const settings = await webflowApi
       .getSettings()
       .catch(() => ({} as Record<string, string>));
     const site = settings?.[WEBFLOW_SETTINGS.publishedUrl]?.trim();
-    if (!site) return undefined;
+    if (!site) return { reason: 'no-site' };
 
     const hit = cache.get(site);
-    if (hit && Date.now() - hit.fetchedAt < TTL_MS) return hit.css;
+    if (hit && Date.now() - hit.fetchedAt < TTL_MS) {
+      return hit.css ? { css: hit.css } : { reason: 'failed' };
+    }
 
     const { css } = await webflowApi.resolveStylesheet(site);
     // Cache even an empty result so a misconfigured URL doesn't refetch on
     // every paste within the TTL window.
     cache.set(site, { css, fetchedAt: Date.now() });
-    return css;
+    return css ? { css } : { reason: 'failed' };
   } catch (error) {
     console.warn('[webflow] global stylesheet load failed:', error);
-    return undefined;
+    return { reason: 'failed' };
   }
 }

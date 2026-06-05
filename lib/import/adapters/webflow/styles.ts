@@ -12,7 +12,7 @@ import { cssToClasses } from '@/lib/import/css';
 import { getAffectedProperties } from '@/lib/tailwind-class-mapper';
 import { splitVariant } from '@/lib/layer-style-resolve';
 import type { XscpAsset, XscpStyle } from '@/lib/import/adapters/webflow/xscp-types';
-import { kebabClassName, type GlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
+import { kebabClassName, ruleToClasses, type GlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
 
 /**
  * Webflow breakpoints are desktop-first. Map each to Ycode's desktop-first
@@ -168,8 +168,8 @@ export function buildStyleResolvers(
     // properties the clipboard doesn't already set are filled, so the resolved
     // clipboard values stay authoritative and nothing is duplicated.
     if (style.name && globalStyles) {
-      const globalDecl = globalStyles.classByName.get(kebabClassName(style.name));
-      if (globalDecl) {
+      const globalRule = globalStyles.classByName.get(kebabClassName(style.name));
+      if (globalRule) {
         // Track which properties the clipboard already sets *per variant*: a
         // hover-only color (e.g. a combo's `main_hover`) must not block the
         // resting-state backfill, and vice versa. Otherwise a class like
@@ -182,7 +182,7 @@ export function buildStyleResolvers(
           for (const p of getAffectedProperties(base)) set.add(p);
           presentByVariant.set(prefix, set);
         }
-        const additions = cssToClasses(globalDecl).filter((cls) => {
+        const additions = ruleToClasses(globalRule).filter((cls) => {
           if (classes.includes(cls)) return false;
           const { prefix, base } = splitVariant(cls);
           const props = getAffectedProperties(base);

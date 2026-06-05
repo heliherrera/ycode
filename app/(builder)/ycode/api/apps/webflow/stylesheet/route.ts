@@ -7,45 +7,32 @@ export const revalidate = 0;
 // DNS resolution + arbitrary outbound fetch need the Node runtime.
 export const runtime = 'nodejs';
 
+// Bound outbound fetches so a slow/hostile upstream can't stall a paste or
+// exhaust memory. Published Webflow pages and their shared stylesheets are
+// comfortably under these limits.
+const FETCH_TIMEOUT_MS = 8_000;
+const MAX_BYTES = 3 * 1024 * 1024; // 3MB
+
 /**
- * GET /ycode/api/apps/webflow/stylesheet
+ * GET /ycode/api/apps/webflow/stylesheet?site=<published site URL>
  *
- * Server-side proxy for a Webflow site's published stylesheet. Fetching it
- * from the builder directly would hit CORS; routing through the server avoids
- * that. Supports two modes:
+ * Server-side proxy that auto-discovers a Webflow site's published stylesheet
+ * from its live page. Fetching it from the builder directly would hit CORS;
+ * routing through the server avoids that.
  *
- *   ?url=<published .css URL>   Fetch a specific website-files.com stylesheet.
- *   ?site=<published site URL>  Auto-discover the shared stylesheet from a
- *                               published site (e.g. https://my-site.webflow.io).
- *
- * `?site=` is preferred for stored connections: Webflow's shared CSS filename
- * carries a content fingerprint that changes on every republish, so we
- * re-discover the current URL from the live page rather than persisting a URL
- * that goes stale.
+ * We discover the URL from the page on every request rather than persisting it:
+ * Webflow's shared CSS filename carries a content fingerprint that changes on
+ * every republish, so a stored URL would go stale.
  */
 export async function GET(request: NextRequest) {
-  const url = request.nextUrl.searchParams.get('url');
   const site = request.nextUrl.searchParams.get('site');
 
-  if (!url && !site) {
-    return noCache({ error: 'Provide a `url` or `site` parameter' }, 400);
+  if (!site) {
+    return noCache({ error: 'Provide a `site` parameter' }, 400);
   }
 
   try {
-    if (url) {
-      const parsed = parseStylesheetUrl(url);
-      if (!parsed) {
-        return noCache(
-          { error: 'Only Webflow website-files.com stylesheets are allowed' },
-          400,
-        );
-      }
-      const css = await fetchText(parsed.toString());
-      return noCache({ data: { css, stylesheetUrl: parsed.toString() } });
-    }
-
-    // `site` mode: fetch the published page, find its shared stylesheet link.
-    const pageUrl = normalizeSiteUrl(site!);
+    const pageUrl = normalizeSiteUrl(site);
     if (!pageUrl) {
       return noCache({ error: 'Enter a valid published site URL' }, 400);
     }
@@ -81,20 +68,6 @@ export async function GET(request: NextRequest) {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-/** Validate a direct stylesheet URL — must be an https website-files.com asset. */
-function parseStylesheetUrl(input: string): URL | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(input);
-  } catch {
-    return null;
-  }
-  const ok =
-    parsed.protocol === 'https:' &&
-    /(^|\.)website-files\.com$/.test(parsed.hostname);
-  return ok ? parsed : null;
-}
 
 /**
  * Normalize a user-entered site URL (bare domain or full URL) to an https URL,
@@ -164,20 +137,85 @@ function isPrivateIp(ip: string): boolean {
   return false;
 }
 
-/** Find the first Webflow shared stylesheet link in a published page's HTML. */
+/**
+ * Find the Webflow shared stylesheet link in a published page's HTML.
+ *
+ * Webflow emits exactly one generated bundle named `*.webflow.shared.*.css`
+ * (the global stylesheet that carries `:root` tokens, tag rules and site-wide
+ * classes). Prefer that; only fall back to any other website-files.com `.css`
+ * when the canonical bundle isn't present.
+ */
 function findStylesheetUrl(html: string): string | null {
   const matches = html.match(
     /https?:\/\/[^"'\s)]*website-files\.com\/[^"'\s)]+\.css/gi,
   );
   if (!matches || matches.length === 0) return null;
-  // Prefer the generated "*.webflow.shared.*.css" bundle (the global stylesheet).
-  return matches.find((m) => /\.webflow\.(shared|)\.?[^/]*\.css/i.test(m)) ?? matches[0];
+  return matches.find((m) => /\.webflow\.shared\.[^/]*\.css$/i.test(m)) ?? matches[0];
 }
 
+/**
+ * Fetch text with a timeout and a hard byte cap. Reads the body as a stream so
+ * an oversized response is aborted instead of being fully buffered.
+ */
 async function fetchText(target: string): Promise<string> {
-  const res = await fetch(target, { redirect: 'follow' });
-  if (!res.ok) {
-    throw new Error(`Upstream returned ${res.status}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(target, {
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Upstream returned ${res.status}`);
+    }
+    return await readCapped(res, MAX_BYTES);
+  } finally {
+    clearTimeout(timer);
   }
-  return res.text();
+}
+
+/** Read a response body up to `maxBytes`, aborting if it would exceed the cap. */
+async function readCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) {
+    const text = await res.text();
+    if (byteLength(text) > maxBytes) {
+      throw new Error('Upstream response too large');
+    }
+    return text;
+  }
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new Error('Upstream response too large');
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return new TextDecoder().decode(concat(chunks, total));
+}
+
+function concat(chunks: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
 }

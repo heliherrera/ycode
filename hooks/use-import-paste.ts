@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import type { Layer } from '@/types';
 import { useFontsStore } from '@/stores/useFontsStore';
@@ -29,12 +30,21 @@ import { isWebflowClipboard, parseWebflowClipboard } from '@/lib/import/adapters
 import { parseGlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
 import { plural } from '@/lib/import/summary';
 import type { ImportSummary } from '@/lib/import/types';
+import { readExternalDesignClipboard } from '@/lib/import/clipboard-detect';
 import { YCODE_LAYER_CLIPBOARD_SIGNATURE } from '@/stores/useClipboardStore';
+import {
+  useExternalPasteStore,
+  type ExternalPastePlacement,
+} from '@/stores/useExternalPasteStore';
 
 interface UseImportPasteOptions {
   enabled: boolean;
-  /** Insert built layers using the host's placement rules. */
-  insertLayers: (layers: Layer[]) => void;
+  /**
+   * Insert built layers using the host's placement rules. When `placement` is
+   * given (a context-menu "Paste after / inside"), insert relative to that
+   * target; otherwise the host falls back to its default selection-based rule.
+   */
+  insertLayers: (layers: Layer[], placement?: ExternalPastePlacement) => void;
   /** Fall back to Ycode's internal clipboard paste. */
   onNormalPaste: () => void;
 }
@@ -148,19 +158,28 @@ function webflowSummaryMessage(summary: ImportSummary): string {
   return `Imported ${parts.join(', ')}`;
 }
 
+// Shown at most once per session: nagging on every paste would be noise.
+let noStylesheetHintShown = false;
+
 export function useImportPaste({
   enabled,
   insertLayers,
   onNormalPaste,
 }: UseImportPasteOptions) {
+  const router = useRouter();
   // Guards against a second paste landing while an import is still running.
   const isProcessingRef = useRef(false);
 
-  const importWebflow = useCallback(async (text: string) => {
+  /** Point the user at the Webflow Design settings to connect a published site. */
+  const openWebflowSettings = useCallback(() => {
+    router.push('/ycode/integrations/apps?app=webflow');
+  }, [router]);
+
+  const importWebflow = useCallback(async (text: string, placement?: ExternalPastePlacement) => {
     isProcessingRef.current = true;
     const toastId = toast.loading('Pasting from Webflow…');
     try {
-      const css = await loadSiteStylesheetCss();
+      const { css, reason } = await loadSiteStylesheetCss();
       const globalStyles = css ? parseGlobalStylesheet(css) : undefined;
       const document = parseWebflowClipboard(text, globalStyles);
       if (!document) {
@@ -188,14 +207,34 @@ export function useImportPaste({
         return;
       }
 
-      insertLayers(layers);
+      insertLayers(layers, placement);
 
-      toast.success(webflowSummaryMessage(summary), {
-        id: toastId,
-        description: summary.collections > 0
-          ? `${plural(summary.collections, 'collection')} to re-link to your CMS.`
-          : undefined,
-      });
+      toast.success(webflowSummaryMessage(summary), { id: toastId });
+
+      // No published site connected → the paste rendered without global styles
+      // (section backgrounds, heading/text colours, fonts). Nudge once.
+      if (reason === 'no-site' && !noStylesheetHintShown) {
+        noStylesheetHintShown = true;
+        toast.message('Connect your published site for full styling', {
+          description:
+            'Add your Webflow site URL so pasted designs pick up global styles, colours and fonts.',
+          action: { label: 'Connect', onClick: openWebflowSettings },
+          duration: 10_000,
+        });
+      }
+
+      // Collections can't be auto-connected on paste — they live in your CMS.
+      // Point the user at the migration flow rather than leaving placeholders.
+      if (summary.collections > 0) {
+        toast.message(
+          `This paste includes ${plural(summary.collections, 'collection')}`,
+          {
+            description: 'Import them under Webflow → CMS to connect your content.',
+            action: { label: 'Open Webflow', onClick: openWebflowSettings },
+            duration: 10_000,
+          },
+        );
+      }
     } catch (error) {
       console.error('[useImportPaste] Webflow import failed:', error);
       toast.error('Failed to import from Webflow', {
@@ -205,11 +244,11 @@ export function useImportPaste({
     } finally {
       isProcessingRef.current = false;
     }
-  }, [insertLayers]);
+  }, [insertLayers, openWebflowSettings]);
 
-  const importFigma = useCallback(async (payload: YcodeFigmaPayload) => {
+  const importFigma = useCallback(async (payload: YcodeFigmaPayload, placement?: ExternalPastePlacement) => {
     isProcessingRef.current = true;
-    const toastId = toast.loading('Importing from Figma...');
+    const toastId = toast.loading('Pasting from Figma…');
     try {
       const { convertFigmaToLayers, extractFontFamilies } = await import('@/lib/figma/converter');
       const { FigmaMaterializer } = await import('@/lib/figma/materializer');
@@ -240,7 +279,7 @@ export function useImportPaste({
         return;
       }
 
-      insertLayers(layers);
+      insertLayers(layers, placement);
 
       const { summary } = materializer;
       const detailParts: string[] = [];
@@ -276,8 +315,49 @@ export function useImportPaste({
     }
   }, [insertLayers]);
 
+  // Imperative entry point for the layer context menu's "Paste after / inside".
+  // Re-reads the OS clipboard (the menu only knew a payload *existed*) and
+  // imports it at the chosen placement.
+  const pasteExternalAt = useCallback(async (placement: ExternalPastePlacement) => {
+    if (isProcessingRef.current) {
+      toast.message('Still pasting the previous selection…');
+      return;
+    }
+    const data = await readExternalDesignClipboard();
+    if (!data) {
+      toast.error('No Figma or Webflow content found on the clipboard');
+      return;
+    }
+    if (data.kind === 'webflow') {
+      void importWebflow(data.text, placement);
+      return;
+    }
+    // Figma: rebuild a DataTransfer-like shim so the shared extractor applies.
+    const shim = {
+      getData: (type: string) =>
+        type === 'text/html' ? data.html : type === 'text/plain' ? data.text : '',
+    } as unknown as DataTransfer;
+    const figma = extractFigmaPayload(shim);
+    if (figma && figma !== 'truncated') {
+      void importFigma(figma, placement);
+    } else {
+      toast.error('Figma data was incomplete', {
+        description: 'Try copying the frames again from Figma.',
+      });
+    }
+  }, [importWebflow, importFigma]);
+
+  // Expose the runner so the context menu (a different subtree) can trigger a
+  // positional external paste.
+  useEffect(() => {
+    if (!enabled) return;
+    const store = useExternalPasteStore.getState();
+    store.setPasteAt(pasteExternalAt);
+    return () => useExternalPasteStore.getState().setPasteAt(null);
+  }, [enabled, pasteExternalAt]);
+
   const handlePaste = useCallback((e: ClipboardEvent) => {
-    if (!enabled || isProcessingRef.current || !e.clipboardData) return;
+    if (!enabled || !e.clipboardData) return;
 
     // Don't hijack pastes into editable fields (inputs, text editor, etc.).
     const target = e.target as HTMLElement | null;
@@ -297,7 +377,7 @@ export function useImportPaste({
     if (text.trim() === YCODE_LAYER_CLIPBOARD_SIGNATURE) {
       e.preventDefault();
       e.stopPropagation();
-      onNormalPaste();
+      if (!isProcessingRef.current) onNormalPaste();
       return;
     }
 
@@ -305,6 +385,10 @@ export function useImportPaste({
     if (text && isWebflowClipboard(text)) {
       e.preventDefault();
       e.stopPropagation();
+      if (isProcessingRef.current) {
+        toast.message('Still pasting the previous selection…');
+        return;
+      }
       void importWebflow(text);
       return;
     }
@@ -322,13 +406,17 @@ export function useImportPaste({
     if (figma) {
       e.preventDefault();
       e.stopPropagation();
+      if (isProcessingRef.current) {
+        toast.message('Still importing the previous selection…');
+        return;
+      }
       void importFigma(figma);
       return;
     }
 
     // 3. Normal Ycode internal paste.
     e.preventDefault();
-    onNormalPaste();
+    if (!isProcessingRef.current) onNormalPaste();
   }, [enabled, importWebflow, importFigma, onNormalPaste]);
 
   useEffect(() => {

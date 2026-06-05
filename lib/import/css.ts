@@ -247,9 +247,18 @@ function mapDeclaration(prop: string, val: string): string[] {
   return out;
 }
 
-/** A CSS property name we are willing to render via the arbitrary fallback. */
+/**
+ * A CSS property name we are willing to render via the arbitrary fallback.
+ *
+ * Custom properties (`--token: value`) are deliberately excluded: Webflow's
+ * exported stylesheet dumps its *entire* design-token set as `--var` declarations
+ * onto class rules (e.g. `.heading-h1` carries 100+ `--font-size--h1: 4rem` style
+ * lines). Those are token *definitions*, not utilities — every `var(--token)`
+ * reference is already resolved to a concrete value up front — so emitting them
+ * as `[--token:value]` classes only floods the layer with meaningless styling.
+ */
 function isRenderableProp(prop: string): boolean {
-  return /^(--)?[a-z][a-z0-9-]*$/.test(prop);
+  return /^[a-z][a-z0-9-]*$/.test(prop);
 }
 
 /**
@@ -266,6 +275,15 @@ export function cssToClasses(style: string, options?: CssToClassesOptions): stri
     const prop = decl.slice(0, colonIdx).trim().toLowerCase();
     const val = sanitizeCssValue(decl.slice(colonIdx + 1));
     if (!val) continue;
+
+    // Gradient-text technique (`background-clip: text` + `-webkit-text-fill-color:
+    // transparent`) can't be reproduced faithfully — we drop the `-webkit-*`
+    // halves, and a lone `background-clip: text` would clip the background to the
+    // glyphs while the text keeps a solid colour, which tends to blank the text.
+    // Skip it so the element keeps its resolved colour and stays visible.
+    if ((prop === 'background-clip' || prop === '-webkit-background-clip') && val === 'text') {
+      continue;
+    }
 
     const declClasses = mapDeclaration(prop, val);
 

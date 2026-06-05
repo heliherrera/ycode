@@ -198,6 +198,11 @@ export default function WebflowSettings({
       setSelectedSiteId('');
       setPreview(null);
       setImports([]);
+      // deleteSettings() also clears the Design published URL — reset that state
+      // and drop the cached stylesheet so a later paste re-discovers cleanly.
+      setPublishedUrl('');
+      setSavedPublishedUrl('');
+      clearStylesheetCache();
       onConnectionChange(false);
       onDisconnect();
     } catch {
@@ -662,7 +667,7 @@ export default function WebflowSettings({
         open={showDisconnect}
         onOpenChange={setShowDisconnect}
         title="Disconnect Webflow?"
-        description="This removes your token and all import records. The Ycode collections created by past migrations will remain."
+        description="This removes your CMS token, your Design site URL, and all import records. The Ycode collections created by past migrations will remain."
         confirmLabel="Disconnect"
         cancelLabel="Cancel"
         confirmVariant="destructive"

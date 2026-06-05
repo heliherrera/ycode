@@ -11,7 +11,7 @@ import { imageFromNode } from '@/lib/import/adapters/webflow/assets';
 import { buildCollectionNode, isCollectionWrapper, isDynamoType } from '@/lib/import/adapters/webflow/collections';
 import { webflowIconSvg } from '@/lib/import/adapters/webflow/icons';
 import { cssToClasses } from '@/lib/import/css';
-import type { GlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
+import { ruleToClasses, type GlobalStylesheet } from '@/lib/import/adapters/webflow/global-styles';
 import type { WebflowParseContext, XscpNode, XscpPayload } from '@/lib/import/adapters/webflow/xscp-types';
 
 const HEADING_TAGS = /^h[1-6]$/;
@@ -206,8 +206,8 @@ export function parseWebflow(data: XscpPayload, globalStyles?: GlobalStylesheet)
     if (!tag || !globalStyles) return null;
     const key = tag.toLowerCase();
     if (tagUnderlayCache.has(key)) return tagUnderlayCache.get(key) ?? null;
-    const decl = globalStyles.tagRules.get(key);
-    const classes = decl ? cssToClasses(decl) : [];
+    const rule = globalStyles.tagRules.get(key);
+    const classes = rule ? ruleToClasses(rule) : [];
     const ref: ImportStyleRef | null = classes.length > 0
       ? { key: `wf-tag:${key}`, name: TAG_STYLE_NAMES[key] ?? key.toUpperCase(), classes }
       : null;
